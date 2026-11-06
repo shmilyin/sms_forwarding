@@ -2157,6 +2157,49 @@ static esp_err_t handle_delete_message(httpd_req_t* req)
         : "{\"success\":false,\"message\":\"未找到\"}");
 }
 
+// 一键清除短信：清收件箱时同步请求模组侧清库。
+// 只清网页缓存不清 SIM 的话，下一轮 CMGL 轮询(或重启后)会把旧短信原样读回来
+// 并再次转发——用户看到的就是"清了又全回来了"。
+static esp_err_t handle_sms_clear(httpd_req_t* req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (!check_csrf(req)) return ESP_OK;
+
+    char query[64] = {};
+    char box_raw[16] = {};
+    bool sent_box = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "box", box_raw, sizeof(box_raw)) == ESP_OK &&
+        strcmp(box_raw, "sent") == 0) {
+        sent_box = true;
+    }
+
+    size_t cleared = idf_inbox_clear(sent_box);
+    // 发件箱是本地记录，删了不影响模组；收件箱才需要同步清模组存储
+    bool purge_queued = sent_box ? false : idf_sms_request_purge_storage();
+    idf_logf("网页一键清除%s: 移除 %u 条，模组存储清理%s",
+             sent_box ? "已发送短信" : "已接收短信",
+             static_cast<unsigned>(cleared),
+             sent_box ? "无需处理" : (purge_queued ? "已提交" : "提交失败"));
+
+    set_json_no_cache(req);
+    char message[160];
+    if (sent_box) {
+        snprintf(message, sizeof(message), "已清空 %u 条已发送短信", static_cast<unsigned>(cleared));
+    } else if (purge_queued) {
+        snprintf(message, sizeof(message), "已清空 %u 条已接收短信，SIM 卡存储清理已提交",
+                 static_cast<unsigned>(cleared));
+    } else {
+        snprintf(message, sizeof(message), "已清空 %u 条已接收短信，但 SIM 卡存储清理未能提交",
+                 static_cast<unsigned>(cleared));
+    }
+    char body[288];
+    snprintf(body, sizeof(body),
+             "{\"success\":true,\"cleared\":%u,\"storagePurgeQueued\":%s,\"message\":\"%s\"}",
+             static_cast<unsigned>(cleared), purge_queued ? "true" : "false", message);
+    return httpd_resp_send(req, body, strlen(body));
+}
+
 static esp_err_t handle_resend_message(httpd_req_t* req)
 {
     if (!check_auth(req)) return ESP_OK;
@@ -4052,6 +4095,7 @@ esp_err_t idf_web_start(void)
     IDF_WEB_TRY_REGISTER("/sendsms", register_handler(s_server, "/sendsms", HTTP_POST, handle_send_sms));
     IDF_WEB_TRY_REGISTER("/resend", register_handler(s_server, "/resend", HTTP_POST, handle_resend_message));
     IDF_WEB_TRY_REGISTER("/delete", register_handler(s_server, "/delete", HTTP_POST, handle_delete_message));
+    IDF_WEB_TRY_REGISTER("/sms/clear", register_handler(s_server, "/sms/clear", HTTP_POST, handle_sms_clear));
     IDF_WEB_TRY_REGISTER("/factory", register_handler(s_server, "/factory", HTTP_POST, handle_factory_reset));
     IDF_WEB_TRY_REGISTER("/import", register_handler(s_server, "/import", HTTP_POST, handle_import_config));
     IDF_WEB_TRY_REGISTER("/update", register_handler(s_server, "/update", HTTP_POST, handle_ota_update));

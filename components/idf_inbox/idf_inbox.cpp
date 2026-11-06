@@ -165,6 +165,27 @@ static void for_each_blob(const char* ns, nvs_handle_t handle, Parse parse)
     }
 }
 
+// 抹掉命名空间下的全部 blob(一键清空用)。必须先迭代收集 key 再统一擦：
+// 迭代过程中 nvs_erase_key 会让迭代器失效，漏掉后续条目就会留下"重启又冒出来"的幽灵短信。
+static size_t erase_all_blobs(const char* ns, nvs_handle_t handle)
+{
+    if (!s_nvs_ready) return 0;
+    std::vector<std::string> keys;
+    nvs_iterator_t it = nullptr;
+    esp_err_t err = nvs_entry_find(SMS_NVS_PART, ns, NVS_TYPE_BLOB, &it);
+    while (err == ESP_OK && it) {
+        nvs_entry_info_t info;
+        nvs_entry_info(it, &info);
+        keys.emplace_back(info.key);
+        err = nvs_entry_next(&it);
+    }
+    if (it) nvs_release_iterator(it);
+    if (keys.empty()) return 0;
+    for (const auto& k : keys) nvs_erase_key(handle, k.c_str());
+    nvs_commit(handle);
+    return keys.size();
+}
+
 static void load_inbox_from_flash()
 {
     std::vector<IdfInboxEntry> items;
@@ -406,6 +427,42 @@ bool idf_inbox_delete(uint32_t id)
     }
     xSemaphoreGive(s_mutex);
     return ok;
+}
+
+size_t idf_inbox_clear(bool sent_box)
+{
+    ensure_init();
+    if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
+
+    size_t removed = 0;
+    if (sent_box) {
+        for (size_t i = 0; i < s_sent_filled; ++i) {
+            if (s_sent[i].id != 0) ++removed;
+            s_sent[i] = IdfSentEntry{};
+        }
+        s_sent_filled = 0;
+        s_sent_head = 0;
+        erase_all_blobs(NS_SENT, s_sent_nvs);
+        // 序号继续递增不归零：同一次开机内 id 不复用，前端缓存不会把新短信当成旧的
+    } else {
+        for (size_t i = 0; i < s_inbox_filled; ++i) {
+            if (!s_inbox[i].deleted && s_inbox[i].id != 0) ++removed;
+            s_inbox[i].deleted = true;  // 已删除条目不参与计数/JSON/转发标记更新
+            s_inbox[i].id = 0;
+            s_inbox[i].sender.clear();
+            s_inbox[i].ts.clear();
+            s_inbox[i].text.clear();
+            s_inbox[i].forwarded = false;
+        }
+        s_inbox_filled = 0;
+        s_inbox_head = 0;
+        erase_all_blobs(NS_INBOX, s_inbox_nvs);
+    }
+    xSemaphoreGive(s_mutex);
+
+    // 清空后仍允许新短信从头填充环；此处只重置游标，不动序号。
+    ESP_LOGI(TAG, "清空%s: 移除 %u 条", sent_box ? "发件箱" : "收件箱", static_cast<unsigned>(removed));
+    return removed;
 }
 
 void idf_sent_add(const char* target, const char* text, bool ok)

@@ -111,6 +111,9 @@ static bool s_backfill_pending = false;   // 索引队列溢出/CMGR 失败时�
 static bool s_cnma_error_logged = false;  // 避免异常固件每条直推短信都刷同一条确认失败日志
 static std::atomic<bool> s_admin_sms_busy{false};
 static std::atomic<bool> s_admin_reset_pending{false};
+// 网页"一键清除短信"只置位请求，真正的 CMGD 由 sms_task 执行：
+// 既能避免与周期 CMGL 轮询抢 AT 通道，也能顺带丢弃已失效的索引队列。
+static std::atomic<bool> s_purge_storage_pending{false};
 
 static void cleanup_start_resources()
 {
@@ -128,6 +131,7 @@ static void cleanup_start_resources()
     }
     s_admin_sms_busy.store(false, std::memory_order_relaxed);
     s_admin_reset_pending.store(false, std::memory_order_relaxed);
+    s_purge_storage_pending.store(false, std::memory_order_relaxed);
 }
 
 // SIM 存储索引 0 是合法值；必须严格解析，不能让乱码被宽松转换成 0。
@@ -1073,6 +1077,43 @@ static void backfill_stored_sms(bool announce)
     if (processed > 0) idf_logf("SIM 暂存短信处理并删除 %d 条", processed);
 }
 
+bool idf_sms_request_purge_storage(void)
+{
+    if (!s_started) return false;
+    s_purge_storage_pending.store(true, std::memory_order_relaxed);
+    idf_modem_signal_event();  // 唤醒短信任务，不必等 500ms 兜底节拍
+    return true;
+}
+
+// 清空模组侧短信存储(优先存储 = CPMS 选定的 MT/ME/SM)。
+// 先丢弃待处理索引与半成品长短信槽位：它们指向的记录马上要被删除，
+// 留着只会在 15 分钟超时后拼出一条"[缺失分段]"残句并转发出去。
+static bool purge_stored_sms()
+{
+    s_index_count = 0;
+    s_backfill_pending = false;
+    for (auto& slot : s_concat) {
+        if (slot.active) clear_concat_slot(slot);
+    }
+
+    std::string resp;
+    esp_err_t err = idf_modem_send_at("AT+CMGD=1,4", 8000, resp);
+    bool ok = err == ESP_OK && resp.find("ERROR") == std::string::npos;
+    if (!ok) {
+        // 部分模组固件不认 delflag=4，退回 3GPP 扩展命令 DEL ALL
+        std::string fallback;
+        esp_err_t err2 = idf_modem_send_at("AT+CMGDA=\"DEL ALL\"", 8000, fallback);
+        ok = err2 == ESP_OK && fallback.find("ERROR") == std::string::npos;
+        if (!ok) {
+            idf_logf("清空模组短信存储失败: CMGD=%s / CMGDA=%s",
+                     esp_err_to_name(err), esp_err_to_name(err2));
+            return false;
+        }
+    }
+    idf_log_line("已清空模组侧短信存储，后续 CMGL 轮询不会再把旧短信读回");
+    return true;
+}
+
 static void sms_task(void*)
 {
     uint64_t last_poll_ms = 0;  // 64 位毫秒：32 位在 49.7 天回绕会重进启动提频窗口
@@ -1133,6 +1174,14 @@ static void sms_task(void*)
             if (backfill_after_reassert) {
                 backfill_after_reassert = false;
                 backfill_stored_sms(false);
+                last_poll_ms = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+                vTaskDelay(pdMS_TO_TICKS(200));
+                continue;
+            }
+
+            if (s_purge_storage_pending.exchange(false, std::memory_order_relaxed)) {
+                // 清空请求优先于收取：此时若先去 CMGR 待处理索引，删完还会把内容当新短信转发
+                purge_stored_sms();
                 last_poll_ms = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
                 vTaskDelay(pdMS_TO_TICKS(200));
                 continue;

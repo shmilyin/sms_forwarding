@@ -16,3 +16,6 @@ preview/index.html
 
 __pycache__/
 *.py[cod]
+
+# 本地 AI 助手工作目录
+.workbuddy/

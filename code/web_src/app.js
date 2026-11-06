@@ -2307,6 +2307,33 @@
         else { var r = document.getElementById('drawerRes'); if (r) { setResult(r, 'result-box result-error', d.message); } }
       }).catch(function(e){ var r = document.getElementById('drawerRes'); if (r) { setResult(r, 'result-box result-error', '请求失败: ' + e); } });
     }
+    // 一键清空当前标签页的全部短信；收件箱同时清 SIM 卡存储，避免旧短信被轮询读回来再转发
+    function clearAllMessages() {
+      var sent = (smsBox === 'sent');
+      var label = sent ? '已发送短信' : '已接收短信';
+      var warn = sent
+        ? '\n\n此操作不可恢复。'
+        : '\n\n同时会清空模组/SIM 卡里的短信存储，设备不会再把它们读回来重新转发。此操作不可恢复。';
+      if (!confirm('确定清空全部' + label + '？' + warn)) return;
+      // 列表已空时仍值得清一次 SIM 存储(老固件/单条删除只清了网页缓存，卡里可能还留着)
+      var cnt = (window.__msgFull || []).length;
+      if (cnt === 0 && !sent && !confirm('网页列表已经是空的，仍要清空模组/SIM 卡里的短信存储吗？')) return;
+      var btn = document.getElementById('smsClearBtn');
+      if (btn) { btn.disabled = true; btn.textContent = '清空中...'; }
+      csrfFetch('/sms/clear?box=' + (sent ? 'sent' : 'recv'), { method: 'POST', cache: 'no-store' })
+        .then(jsonOrThrow).then(function(d) {
+          showToast(d && d.message ? d.message : '已清空', d && d.success ? 'ok' : 'err');
+          window.__msgFull = null;   // 丢掉本地缓存，强制重新拉取
+          window.__msgBox = null;
+          window.__msgCache = [];
+          closeMsgDrawer();
+          loadMessages();
+        }).catch(function(e) {
+          showToast('清空失败: ' + (e && e.message ? e.message : e), 'err');
+        }).then(function() {
+          if (btn) { btn.disabled = false; btn.textContent = '清空'; }
+        });
+    }
     // ---- 概览：最新接收 / 验证码 hero ----
     var latestOtpLoading = false, latestOtpTimer = null;
     function loadLatestOtp() {

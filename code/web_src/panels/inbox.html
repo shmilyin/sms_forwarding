@@ -8,6 +8,7 @@
           <input id="smsSearch" class="form-input msg-search" placeholder="搜索发件人或正文…" oninput="renderMessages()">
           <button class="btn btn-secondary btn-sm" onclick="loadMessages()">刷新</button>
           <button class="btn btn-primary btn-sm" onclick="openSmsModal()">发短信</button>
+          <button class="btn btn-danger btn-sm" id="smsClearBtn" onclick="clearAllMessages()">清空</button>
         </div>
         <div class="card-body">
           <div id="inboxList">加载中...</div>

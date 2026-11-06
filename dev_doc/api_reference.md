@@ -397,6 +397,7 @@ HTTP Basic Authentication，账号密码来自 `config.webUser` / `config.webPas
 | `GET /status` | `handleStatus()` | 健康状态 JSON（版本/信号/堆水位/各队列深度/统计/复位原因/时间） |
 | `GET /messages` | `handleMessages()` | 收件箱/已发送 JSON（`?box=sent`），流式分块输出 |
 | `POST /resend` `POST /delete` | `handleResend()` / `handleDeleteMsg()` | 重发/删除收件箱某条（`?id=`） |
+| `POST /sms/clear` | `handle_sms_clear()` | 一键清空收件箱/已发送（`?box=sent`）。清收件箱时同时置位模组清库请求，由 `idf_sms` 任务执行 `AT+CMGD=1,4`（失败退回 `AT+CMGDA="DEL ALL"`），并丢弃待处理索引与半成品长短信槽位；返回 `cleared` 条数与 `storagePurgeQueued` |
 | `GET /keepalive` | `handleKeepAlive()` | 保号：`?action=status\|run\|reset`；`run` 入队由 loop 执行（默认动作 = 蜂窝 HTTP payload 下载） |
 | `GET /testpush` | `handleTestPush()` | 通道测试：`?ch=` 入队，`?action=status` 轮询；真实发送在 worker |
 | `GET /ussd` | `handleUssd()` | USSD 查询（`AT+CUSD`，同步最长 ~20s） |
